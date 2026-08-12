@@ -32,8 +32,30 @@ def num(value: Any) -> str:
 def human(value: Any) -> str:
     value = str(value or "")
     value = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", value)
-    value = value.replace("Spd", "Speed").replace("Dmg", "Damage").replace("Amt", "Amount")
+    words = {
+        "Spd": "Speed", "Dmg": "Damage", "Amt": "Amount",
+        "Def": "Defense", "Gen": "Generation", "Mult": "Multiplier",
+    }
+    value = " ".join(words.get(word, word) for word in value.split())
     return re.sub(r"\s+", " ", value).strip()
+
+
+def percent(value: Any) -> str:
+    """Format a data ratio as a reader-facing percentage."""
+    amount = float(value) * 100
+    # Runtime thresholds sometimes include a tiny epsilon (for example .501).
+    # Tooltips should show the intended whole percentage, not that telemetry.
+    if abs(amount - round(amount)) <= 0.1000001:
+        amount = float(round(amount))
+    return f"{num(amount)}%"
+
+
+def scrub_vectors(line: str) -> str:
+    """Never expose Unity Vector2/Vector3 values in reader-facing copy."""
+    number = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)"
+    vector = rf"\(\s*{number}\s*,\s*{number}(?:\s*,\s*{number})?\s*\)"
+    line = re.sub(rf"\s*{vector}", "", line)
+    return re.sub(r"\s+([,;])", r"\1", re.sub(r"\s{2,}", " ", line)).strip(" ,;—")
 
 
 def display_name(name: str) -> str:
@@ -86,14 +108,70 @@ class Bible:
         if attack.get("magicCost"):
             bits.append(f"{num(attack['magicCost'])} magic")
         if attack.get("poiseMult", 1) != 1:
-            bits.append(f"×{num(attack['poiseMult'])} poise")
+            change = (float(attack["poiseMult"]) - 1) * 100
+            quality = "more" if change > 0 else "less"
+            bits.append(f"{num(abs(change))}% {quality} poise damage")
         if attack.get("stunTime"):
             bits.append(f"{num(attack['stunTime'])}s stun")
         if attack.get("knockback", "(0, 0, 0)") != "(0, 0, 0)":
-            bits.append(f"knockback {attack['knockback']}")
+            bits.append("knockback")
         if attack.get("hitFrequency"):
-            bits.append(f"{num(attack['hitFrequency'])}s hit interval")
+            bits.append(f"hits every {num(attack['hitFrequency'])}s")
         return " · ".join(bits)
+
+    @staticmethod
+    def attack_target(value: Any) -> str:
+        names = [x.strip() for x in str(value or "0").split(",") if x.strip() not in ("0", "-1")]
+        if not names:
+            return "any attack"
+        if all(x.startswith("Spell") for x in names):
+            return "casting a spell"
+        groups = []
+        for name in names:
+            if name.startswith("HeavyHold"):
+                group = "held heavy attacks"
+            elif name.startswith("Jump"):
+                group = "jump attacks"
+            elif name.startswith("Sprint"):
+                group = "sprint attacks"
+            elif name.startswith("Heavy"):
+                group = "heavy attacks"
+            elif name.startswith("Light"):
+                group = "light attacks"
+            elif name.startswith("Spell"):
+                group = "spells"
+            else:
+                group = human(re.sub(r"\d+$", "", name)).lower()
+            if group not in groups:
+                groups.append(group)
+        if len(groups) > 3:
+            return "weapon attacks"
+        return ", ".join(groups[:-1]) + (" and " if len(groups) > 1 else "") + groups[-1]
+
+    @staticmethod
+    def state_condition(mod: dict[str, Any]) -> str:
+        groups = []
+        for field in ("actState", "posState"):
+            states = [human(x).lower() for x in str(mod.get(field, "0")).split(",") if x.strip() not in ("0", "-1")]
+            if states:
+                groups.append(" or ".join(states))
+        return " and ".join(groups) or "the condition is met"
+
+    @staticmethod
+    def chance_text(value: Any) -> str:
+        """Probability curves are implementation detail; scalar chances are useful."""
+        if isinstance(value, (list, tuple)) or re.fullmatch(
+            r"\s*\([^)]*,[^)]*\)\s*", str(value or "")
+        ):
+            return ""
+        try:
+            chance = float(value)
+        except (TypeError, ValueError):
+            return ""
+        if chance < 0:
+            return ""
+        chance = chance * 100 if chance <= 1 else chance
+        return f"{num(chance)}% chance"
 
     def trigger_line(self, mod: dict[str, Any]) -> str:
         trigger = str(mod.get("trigger", "Passive"))
@@ -102,28 +180,25 @@ class Bible:
             pass
         elif trigger == "Attack":
             attack_trigger = human(mod.get("attackTrigger", "Constant")).lower()
-            target_names = [human(x).lower() for x in re.split(r",\s*", str(mod.get("targetAttack", "0"))) if x != "0"]
-            if target_names and all(x.startswith("spell") for x in target_names):
-                target = "casting a spell"
-            elif len(target_names) > 3 and all("spell" not in x for x in target_names):
-                target = "weapon attacks"
-            else:
-                target = ", ".join(target_names) if target_names else "an attack"
+            target = self.attack_target(mod.get("targetAttack", "0"))
             pieces.append(f"after {target}" if attack_trigger == "on end" else f"on {target}")
         elif trigger in ("Health", "Magic"):
-            op = "≥" if mod.get("greaterThan", True) else "≤"
-            pieces.append(f"when {trigger.lower()} {op} {num(mod.get('triggerAmount', 0))}")
+            amount = float(mod.get("triggerAmount", 0) or 0)
+            threshold = percent(amount) if abs(amount) <= 1 else num(amount)
+            relation = "above" if mod.get("greaterThan", True) else "below"
+            pieces.append(f"when {trigger.lower()} is {relation} {threshold}")
         elif trigger == "State":
-            conditions = [x for x in (str(mod.get("actState", "0")), str(mod.get("posState", "0"))) if x != "0"]
-            pieces.append("while " + (" / ".join(conditions) if conditions else "state condition is met"))
+            pieces.append("while " + self.state_condition(mod))
         elif trigger == "Overkill":
-            pieces.append(f"on overkill ≥ {num(mod.get('triggerAmount', 0))}")
+            pieces.append("on overkill")
         else:
             pieces.append("on " + human(trigger).lower())
         if mod.get("useTimer"):
             pieces.append(f"every {num(mod.get('frequency', 1))}s")
         if mod.get("useProbability"):
-            pieces.append(f"chance range {mod.get('triggerChance', '(0, 1)')}")
+            chance = self.chance_text(mod.get("triggerChance"))
+            if chance:
+                pieces.append(chance)
         if mod.get("triggerOnce"):
             pieces.append("once")
         return ", ".join(pieces)
@@ -137,7 +212,7 @@ class Bible:
         amount = ""
         if damages:
             low, high = min(damages), max(damages)
-            amount = f" (~{num(low)} dmg)" if low == high else f" (~{num(low)}–{num(high)} dmg)"
+            amount = f" ({num(low)} damage)" if low == high else f" ({num(low)}–{num(high)} damage)"
         trigger = self.trigger_line(mods[0]) if len(mods) == 1 else ""
         return f"adds extra attacks{amount}" + (f" {trigger}" if trigger else "")
 
@@ -155,24 +230,29 @@ class Bible:
         kind = str(mod.get("type", "Attribute"))
         value = num(mod.get("value", 0))
         if kind == "Attribute":
-            attribute = human(mod.get("attribute", "Unknown"))
+            attribute = human(mod.get("attribute", "Unknown")).lower()
             if float(mod.get("value", 0) or 0) == 0 and str(mod.get("variableMult", "None")) == "None":
                 return ""
-            if mod.get("multiplicative"):
-                effect = f"×{float(mod.get('value', 0) or 0) / 100:g} {attribute.lower()}"
-            else:
-                sign = "+" if float(mod.get("value", 0) or 0) >= 0 else ""
-                effect = f"{sign}{value} {attribute.lower()}"
             variable = str(mod.get("variableMult", "None"))
             if variable != "None":
-                effect += f" × current {human(variable)} (offset {num(mod.get('multOffset', 0))})"
+                effect = f"gain {attribute} equal to {num(abs(float(mod.get('value', 0) or 0)))}% of bonus {human(variable).lower()}"
+            elif attribute in ("max health", "max magic"):
+                action = "gain" if float(mod.get("value", 0) or 0) >= 0 else "lose"
+                effect = f"{action} {num(abs(float(mod.get('value', 0) or 0)))} {attribute}"
+            else:
+                raw_change = float(mod.get("value", 0) or 0)
+                change = raw_change - 100 if mod.get("multiplicative") else raw_change
+                action = "increase" if change >= 0 else "reduce"
+                effect = f"{action} {attribute} by {num(abs(change))}%"
         elif kind == "DamageOverTime":
             if float(mod.get("value", 0) or 0) == 0:
                 return ""
             effect = (
                 f"{value} damage every {num(mod.get('tickRate', 0.1))}s for "
-                f"{num(mod.get('duration', 1))}s, up to {num(mod.get('stackLimit', 1))} stacks"
+                f"{num(mod.get('duration', 1))}s"
             )
+            if mod.get("stackLimit", 1) != 1:
+                effect += ", stacking"
         elif kind == "Buff":
             nested_mods = [self.resolve(x) for x in mod.get("modList", [])]
             nested_mods = [x for x in nested_mods if x]
@@ -187,7 +267,7 @@ class Bible:
             elif duration < 0 or mod.get("persistant"):
                 effect += " permanently"
             if mod.get("stackLimit", 1) != 1:
-                effect += f", up to {num(mod['stackLimit'])} stacks"
+                effect += ", stacking"
         elif kind == "Attack":
             effect = self.attack_summary([mod])
         elif kind == "Health":
@@ -203,15 +283,30 @@ class Bible:
             if mod.get("duration"):
                 effect += f" for {num(mod['duration'])}s"
         elif kind in ("Knockback", "KnockbackMult"):
-            effect = f"{human(kind)} {mod.get('knockback', value)}"
+            effect = "knockback"
         elif kind == "Custom":
-            effect = f"{human(mod.get('customEffect', 'custom effect'))} {value}"
+            custom = str(mod.get("customEffect", "custom effect"))
+            amount = float(mod.get("value", 0) or 0)
+            if custom == "PercentGold":
+                effect = f"{num(abs(amount))}% more gold"
+            elif custom == "PercentSouls":
+                effect = f"{num(abs(amount))}% more souls"
+            elif custom == "SpellCost":
+                effect = f"spells cost {num(abs(amount))} less magic" if amount < 0 else "spells cost more magic"
+            elif custom == "DamageReflect":
+                effect = "reflect damage"
+            elif custom == "NumRespawns":
+                effect = "gain an extra respawn"
+            elif custom == "PriestBoonCount":
+                effect = "empower priest boons"
+            else:
+                effect = human(custom).lower()
         elif kind in ("Prefab", "Projectile"):
             effect = "spawns a projectile" if kind == "Projectile" else "spawns an effect"
         else:
-            effect = f"{human(kind)} {value}"
+            effect = human(kind).lower()
         trigger = self.trigger_line(mod)
-        return effect + (" — " + trigger if trigger else "")
+        return scrub_vectors(effect + (" — " + trigger if trigger else ""))
 
     def effects(self, boon_ref: Any) -> list[str]:
         boon = self.resolve(boon_ref)
@@ -231,7 +326,7 @@ class Bible:
     def effects_html(self, effects: list[str]) -> str:
         if not effects:
             return ""
-        return '<ul class="effects">' + "".join(f"<li>{esc(line)}</li>" for line in effects) + "</ul>"
+        return '<ul class="effects">' + "".join(f"<li>{esc(scrub_vectors(line))}</li>" for line in effects) + "</ul>"
 
     def card(self, obj: dict[str, Any], body: str, tags: list[str] | None = None, effects: list[str] | None = None) -> str:
         name = display_name(obj.get("$name", "Unnamed"))
