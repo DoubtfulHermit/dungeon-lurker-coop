@@ -350,7 +350,7 @@ def page(data: dict[str, Any]) -> tuple[str, dict[str, int]]:
     }
 
     sections = [
-        ("boons", f"Boons <em>{counts['boons']} featured · {counts['boons_total']} total</em>", "Player-facing blessings. Equipment, tonic, and curse helper boons are omitted here.", "".join(boon_cards), "card-grid"),
+        ("boons", f"Boons <em>{counts['boons']}</em>", "", "".join(boon_cards), "card-grid"),
         ("spells", f"Spells <em>{counts['spells']}</em>", "Magic costs and notable combat properties for each spell.", "".join(spell_cards), "card-grid wide"),
         ("blades", f"Blades <em>{counts['blades']}</em>", "Weapons and the bonuses that make each one distinct.", "".join(blade_cards), "card-grid"),
         ("charms", f"Charms <em>{counts['charms']}</em>", "Charms with their attached passive effects.", "".join(charm_cards), "card-grid"),
