@@ -357,7 +357,7 @@ def page(data: dict[str, Any]) -> tuple[str, dict[str, int]]:
         ("tonics", f"Tonics <em>{counts['tonics']}</em>", "Temporary boosts, restoration values, and their most important effects.", "".join(tonic_cards), "card-grid"),
         ("items", f"Items <em>{counts['items']}</em>", "Currencies, quest objects, consumables, and other inventory finds.", "".join(item_cards), "card-grid compact"),
     ]
-    section_html = "".join(f'<section id="{sid}" data-section><header><h2>{title}</h2><p>{desc}</p></header><div class="{cls}">{content}</div><p class="empty-section" hidden>No matches in this section.</p></section>' for sid, title, desc, content, cls in sections)
+    section_html = "".join(f'<section id="{sid}" data-section><header><h2>{title}</h2>{('<p>' + desc + '</p>') if desc else ''}</header><div class="{cls}">{content}</div><p class="empty-section" hidden>No matches in this section.</p></section>' for sid, title, desc, content, cls in sections)
     section_html += f'''<section id="shops" data-section><header><h2>Shops &amp; Loot <em>{counts['shops']} shops · {counts['loot_pools']} pools</em></h2><p>Shop stock and currency costs, plus loot pool amounts.</p></header><div class="shop-grid">{''.join(shop_cards)}{''.join(loot_cards)}</div><p class="empty-section" hidden>No matching stock or loot.</p></section>'''
 
     nav = "".join(f'<a href="#{sid}">{label}</a>' for sid, label in (("boons", "Boons"), ("spells", "Spells"), ("blades", "Blades"), ("charms", "Charms"), ("tonics", "Tonics"), ("items", "Items"), ("shops", "Shops/Loot")))
